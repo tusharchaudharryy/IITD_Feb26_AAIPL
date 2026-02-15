@@ -1,13 +1,66 @@
 import time
 import torch
 import re
+import os
 from typing import Optional, List
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+def extract_json_balanced(text):
+    """
+    Extracts the first balanced JSON object { ... } from a string.
+    Ignores trailing text/garbage after the closing brace.
+    """
+    start = text.find('{')
+    if start == -1:
+        return text 
+        
+    text = text[start:] 
+    depth = 0
+    in_string = False
+    escape = False
+    
+    for i, char in enumerate(text):
+        if char == '"' and not escape:
+            in_string = not in_string
+        if char == '\\' and not escape:
+            escape = True
+        else:
+            escape = False
+            
+        if not in_string:
+            if char == '{':
+                depth += 1
+            elif char == '}':
+                depth -= 1
+                if depth == 0:
+                    return text[:i+1]
+    
+    return text
+
 class QAgent(object):
     def __init__(self, **kwargs):
-        # Path to your fine-tuned model
-        model_name = "/workspace/AAIPL/hf_models/final_submission"
+        # --- PATH RESOLUTION LOGIC ---
+        # 1. Check if path is provided in kwargs
+        # 2. Check strict absolute path (Current Server)
+        # 3. Check relative path (Best for portability/evaluators)
+        
+        candidates = [
+            kwargs.get("model_path"),
+            "/workspace/AAIPL/hf_models/final_submission",
+            os.path.join(os.path.dirname(__file__), "../hf_models/final_submission"),
+            os.path.join(os.path.dirname(__file__), "../../hf_models/final_submission")
+        ]
+        
+        model_name = None
+        for path in candidates:
+            if path and os.path.exists(path):
+                model_name = path
+                break
+        
+        if model_name is None:
+            # Fallback to the absolute path even if check failed, to show clear error
+            model_name = "/workspace/AAIPL/hf_models/final_submission"
+            print(f"WARNING: Model path not found. Defaulting to {model_name}")
         
         print(f"Loading Q-Agent from {model_name}...")
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
@@ -55,7 +108,7 @@ class QAgent(object):
         with torch.no_grad():
             outputs = self.model.generate(
                 **model_inputs,
-                # CAP TOKENS: 400 is enough for a question, ensures < 13s
+                # Speed Cap: 400 tokens is enough for a question (avoids 13s timeout)
                 max_new_tokens=min(kwargs.get("max_new_tokens", 1024), 400),
                 temperature=kwargs.get("temperature", 0.7),
                 do_sample=kwargs.get("do_sample", True),
@@ -75,16 +128,11 @@ class QAgent(object):
                 
             raw_content = self.tokenizer.decode(output_ids, skip_special_tokens=True).strip()
             
-            # --- ROBUST FIX: Regex JSON Extraction ---
-            # Finds the text between the first '{' and the last '}'
-            try:
-                json_match = re.search(r'\{.*\}', raw_content, re.DOTALL)
-                if json_match:
-                    clean_content = json_match.group(0)
-                else:
-                    clean_content = raw_content
-            except:
-                clean_content = raw_content
+            # --- FINAL ROBUST FIX: Balanced Extraction ---
+            clean_content = extract_json_balanced(raw_content)
+            
+            # Control Character Fix: Replace newlines with spaces to satisfy JSON parser
+            clean_content = clean_content.replace('\n', ' ').replace('\r', '')
                 
             batch_outs.append(clean_content)
 

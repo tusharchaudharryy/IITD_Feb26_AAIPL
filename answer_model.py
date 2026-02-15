@@ -1,12 +1,46 @@
 import time
 import torch
 import re
+import os
 from typing import Optional, List
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+def extract_json_balanced(text):
+    start = text.find('{')
+    if start == -1: return text
+    text = text[start:]
+    depth = 0
+    in_string = False
+    escape = False
+    for i, char in enumerate(text):
+        if char == '"' and not escape: in_string = not in_string
+        if char == '\\' and not escape: escape = True
+        else: escape = False
+        if not in_string:
+            if char == '{': depth += 1
+            elif char == '}': depth -= 1
+            if depth == 0: return text[:i+1]
+    return text
+
 class AAgent(object):
     def __init__(self, **kwargs):
-        model_name = "/workspace/AAIPL/hf_models/final_submission"
+        # --- PATH RESOLUTION LOGIC ---
+        candidates = [
+            kwargs.get("model_path"),
+            "/workspace/AAIPL/hf_models/final_submission",
+            os.path.join(os.path.dirname(__file__), "../hf_models/final_submission"),
+            os.path.join(os.path.dirname(__file__), "../../hf_models/final_submission")
+        ]
+        
+        model_name = None
+        for path in candidates:
+            if path and os.path.exists(path):
+                model_name = path
+                break
+        
+        if model_name is None:
+            model_name = "/workspace/AAIPL/hf_models/final_submission"
+            print(f"WARNING: Model path not found. Defaulting to {model_name}")
         
         print(f"Loading A-Agent from {model_name}...")
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
@@ -54,8 +88,9 @@ class AAgent(object):
         with torch.no_grad():
             outputs = self.model.generate(
                 **model_inputs,
+                # Speed Cap: 200 tokens is enough for an answer (avoids 9s timeout)
                 max_new_tokens=min(kwargs.get("max_new_tokens", 512), 200),
-                temperature=kwargs.get("temperature", 0.1), 
+                temperature=kwargs.get("temperature", 0.1),
                 do_sample=kwargs.get("do_sample", False),
                 pad_token_id=self.tokenizer.pad_token_id,
             )
@@ -73,14 +108,9 @@ class AAgent(object):
                 
             raw_content = self.tokenizer.decode(output_ids, skip_special_tokens=True).strip()
             
-            try:
-                json_match = re.search(r'\{.*\}', raw_content, re.DOTALL)
-                if json_match:
-                    clean_content = json_match.group(0)
-                else:
-                    clean_content = raw_content
-            except:
-                clean_content = raw_content
+            # --- FINAL ROBUST FIX ---
+            clean_content = extract_json_balanced(raw_content)
+            clean_content = clean_content.replace('\n', ' ').replace('\r', '')
 
             batch_outs.append(clean_content)
 
