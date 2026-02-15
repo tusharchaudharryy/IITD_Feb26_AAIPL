@@ -1,0 +1,5 @@
+hf_models/
+data/
+__pycache__/
+*.log
+.ipynb_checkpoints/
